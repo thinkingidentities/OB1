@@ -12,7 +12,13 @@ import { createClient } from "@supabase/supabase-js";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
-const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
+// Accept multiple keys: primary + per-cognate keys (comma-separated in OB1_VALID_KEYS)
+const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY") || "";
+const OB1_VALID_KEYS = new Set(
+  [MCP_ACCESS_KEY, ...(Deno.env.get("OB1_VALID_KEYS") || "").split(",")]
+    .map(k => k.trim())
+    .filter(Boolean)
+);
 const PORT = parseInt(Deno.env.get("OB1_PORT") || "3037");
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
@@ -352,7 +358,7 @@ const app = new Hono();
 
 app.all("*", async (c) => {
   const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  if (!provided || provided !== MCP_ACCESS_KEY) {
+  if (!provided || !OB1_VALID_KEYS.has(provided)) {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
