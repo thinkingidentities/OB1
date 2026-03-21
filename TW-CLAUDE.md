@@ -8,7 +8,7 @@ When instructions conflict, this file takes precedence over `CLAUDE.md`.
 This is a TrustedWork fork of [NateBJones-Projects/OB1](https://github.com/NateBJones-Projects/OB1) (Open Brain).
 
 - **Upstream:** `upstream/main` → `NateBJones-Projects/OB1`
-- **Fork origin:** `origin` → `twdevjim/OB1`
+- **Fork origin:** `origin` → `thinkingidentities/OB1`
 - **Local clone:** `/home/jim00/ob1` (DGX)
 - **Linear project:** OB1 — Open Brain Unified Memory
 - **Parent epic:** TWC-1849
