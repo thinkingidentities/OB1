@@ -92,11 +92,38 @@ From the upstream `CLAUDE.md` — these apply to ALL branches:
 - **No binary blobs** over 1MB.
 - **No destructive SQL** (`DROP TABLE`, `TRUNCATE`, unqualified `DELETE FROM`).
 
+## Running Services (DGX)
+
+### Supabase (local)
+- **API:** http://127.0.0.1:54321
+- **DB:** postgresql://postgres:postgres@127.0.0.1:54322/postgres
+- **Studio:** http://127.0.0.1:54323
+- **Schema:** `thoughts` table with pgvector (1536-dim), `match_thoughts` RPC
+- **Init:** `cd ~/ob1 && supabase start`
+
+### OB1 MCP Server
+- **Port:** 3037
+- **systemd:** `tw-ob1.service` (user)
+- **Entrypoint:** `server/tw-serve.ts` (TW wrapper, configurable port via OB1_PORT)
+- **Auth:** `x-brain-key` header, key from `kv/services/ob1/mcp`
+- **Start:** `bash server/start.sh` (reads Vault, no .env)
+
+### Vault Paths
+- `kv/services/ob1/supabase` — SUPABASE_URL, SUPABASE_SECRET_KEY, SUPABASE_PUBLISHABLE_KEY
+- `kv/services/ob1/openrouter` — OPENROUTER_API_KEY (embeddings via OpenRouter)
+- `kv/services/ob1/mcp` — MCP_ACCESS_KEY
+
+### MCP Tools
+- `capture_thought` — Save a thought (auto-embeds + extracts metadata via OpenRouter)
+- `search_thoughts` — Semantic search by meaning (pgvector cosine similarity)
+- `list_thoughts` — List recent thoughts with filters (type, topic, person, days)
+- `thought_stats` — Summary statistics (counts, types, topics, people)
+
 ## Current Focus
 
 Standing up vanilla OB1 on DGX:
-1. TWC-1850: Supabase project + pgvector schema + Vault secrets
-2. TWC-1851: Deno/Hono MCP server running as systemd unit
+1. ~~TWC-1850: Supabase project + pgvector schema + Vault secrets~~ DONE
+2. ~~TWC-1851: Deno/Hono MCP server running as systemd unit~~ DONE
 3. TWC-1852: MCP integration into Claude Code
 4. TWC-1853: Seed ThinkTeam knowledge base
 
