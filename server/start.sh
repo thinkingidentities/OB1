@@ -16,7 +16,9 @@ export MCP_ACCESS_KEY="$(vault kv get -field=MCP_ACCESS_KEY kv/services/ob1/mcp)
 GLASSWORK_KEY="$(vault kv get -field=GLASSWORK_OB1_KEY kv/services/ob1/mcp)"
 EMBER_KEY="$(vault kv get -field=EMBER_OB1_KEY kv/services/ob1/mcp)"
 GABE_KEY="$(vault kv get -field=GABE_OB1_KEY kv/services/ob1/mcp)"
-export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY}"
+CODE_KEY="$(vault kv get -field=CODE_OB1_KEY kv/services/ob1/mcp)"
+CODEX_KEY="$(vault kv get -field=CODEX_OB1_KEY kv/services/ob1/mcp)"
+export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENO="$HOME/.deno/bin/deno"
