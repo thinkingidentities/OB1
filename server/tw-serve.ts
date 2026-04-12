@@ -363,7 +363,29 @@ app.all("*", async (c) => {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
-  const transport = new StreamableHTTPTransport();
+  // Detect whether client supports SSE (Streamable HTTP).
+  // claude.ai's remote MCP connector may not send Accept: text/event-stream,
+  // which causes @hono/mcp to hard-reject with 406. Fall back to JSON mode
+  // for those clients so tools still work.
+  const acceptHeader = c.req.header("Accept") || "";
+  const clientAcceptsSSE = acceptHeader.includes("text/event-stream");
+
+  const transport = new StreamableHTTPTransport({
+    enableJsonResponse: !clientAcceptsSSE,
+  });
+
+  if (!clientAcceptsSSE) {
+    // Override Accept header so the transport's strict check doesn't 406.
+    // The transport will return plain JSON instead of SSE when enableJsonResponse is true.
+    const origHeader = c.req.header.bind(c.req);
+    (c.req.header as Function) = (name?: string) => {
+      if (typeof name === "string" && name.toLowerCase() === "accept") {
+        return "application/json, text/event-stream";
+      }
+      return origHeader(name);
+    };
+  }
+
   await server.connect(transport);
   return transport.handleRequest(c);
 });
