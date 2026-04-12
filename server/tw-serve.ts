@@ -363,7 +363,31 @@ app.all("*", async (c) => {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
-  const transport = new StreamableHTTPTransport();
+  // Detect whether client supports SSE (Streamable HTTP).
+  // Some MCP clients may not send Accept: text/event-stream (the MCP spec
+  // requires it, but @hono/mcp's enforcement is stricter than some clients
+  // in practice). Fall back to JSON response mode for those clients so tools
+  // still work. This is defensive — currently Code, Glasswork, Code-Mac, and
+  // claude.ai (both web and iOS) all send text/event-stream correctly.
+  const acceptHeader = c.req.header("Accept") || "";
+  const clientAcceptsSSE = acceptHeader.includes("text/event-stream");
+
+  const transport = new StreamableHTTPTransport({
+    enableJsonResponse: !clientAcceptsSSE,
+  });
+
+  if (!clientAcceptsSSE) {
+    // Override Accept header so the transport's strict check doesn't 406.
+    // The transport will return plain JSON instead of SSE when enableJsonResponse is true.
+    const origHeader = c.req.header.bind(c.req);
+    (c.req.header as Function) = (name?: string) => {
+      if (typeof name === "string" && name.toLowerCase() === "accept") {
+        return "application/json, text/event-stream";
+      }
+      return origHeader(name);
+    };
+  }
+
   await server.connect(transport);
   return transport.handleRequest(c);
 });
