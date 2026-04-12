@@ -364,9 +364,11 @@ app.all("*", async (c) => {
   }
 
   // Detect whether client supports SSE (Streamable HTTP).
-  // claude.ai's remote MCP connector may not send Accept: text/event-stream,
-  // which causes @hono/mcp to hard-reject with 406. Fall back to JSON mode
-  // for those clients so tools still work.
+  // Some MCP clients may not send Accept: text/event-stream (the MCP spec
+  // requires it, but @hono/mcp's enforcement is stricter than some clients
+  // in practice). Fall back to JSON response mode for those clients so tools
+  // still work. This is defensive — currently Code, Glasswork, Code-Mac, and
+  // claude.ai (both web and iOS) all send text/event-stream correctly.
   const acceptHeader = c.req.header("Accept") || "";
   const clientAcceptsSSE = acceptHeader.includes("text/event-stream");
 
