@@ -8,6 +8,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
@@ -19,6 +20,39 @@ const OB1_VALID_KEYS = new Set(
     .map(k => k.trim())
     .filter(Boolean)
 );
+
+// Build key→cognate reverse map from OB1_COGNATE_KEYS JSON env var.
+// start.sh constructs this as {"glasswork":"<key>","ember":"<key>",...}. We invert it here
+// so the middleware can derive the authenticated cognate from the presented key.
+const cognateKeyMap: Map<string, string> = (() => {
+  const raw = Deno.env.get("OB1_COGNATE_KEYS") || "{}";
+  const map = new Map<string, string>();
+  try {
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    for (const [cognate, key] of Object.entries(parsed)) {
+      const trimmed = key?.trim();
+      if (trimmed) map.set(trimmed, cognate);
+    }
+  } catch (err) {
+    console.error("[ob1] Failed to parse OB1_COGNATE_KEYS:", (err as Error).message);
+  }
+  return map;
+})();
+
+// AsyncLocalStorage threads the authenticated cognate from the Hono middleware
+// to the MCP tool handlers. MCP handlers don't receive Hono context, so we can't
+// use c.set/c.get — AsyncLocalStorage is the standard Deno/Node mechanism for
+// request-scoped identity propagation across async boundaries.
+const cognateStore = new AsyncLocalStorage<string>();
+
+// Extract the first [Bracket Tag] token from content as the subject preamble.
+// Distinguishes "who wrote this" (server-stamped captured_by) from "what this is about"
+// (client-authored subject_preamble). Cross-reference is expected in the meta-pair workflow.
+function extractSubjectPreamble(content: string): string | null {
+  const match = content.match(/^\s*\[([^\]]+)\]/);
+  return match ? match[1].trim() : null;
+}
+
 const PORT = parseInt(Deno.env.get("OB1_PORT") || "3037");
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
@@ -131,6 +165,7 @@ server.registerTool(
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            `By: ${m.captured_by || "unknown"}`,
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length)
@@ -212,7 +247,8 @@ server.registerTool(
         ) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+          const by = m.captured_by ? ` by ${m.captured_by}` : "";
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}${by}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
         }
       );
 
@@ -320,10 +356,18 @@ server.registerTool(
         extractMetadata(content),
       ]);
 
+      const capturedBy = cognateStore.getStore() || "unknown";
+      const subjectPreamble = extractSubjectPreamble(content);
+
       const { error } = await supabase.from("thoughts").insert({
         content,
         embedding,
-        metadata: { ...metadata, source: "mcp" },
+        metadata: {
+          ...metadata,
+          source: "mcp",
+          captured_by: capturedBy,
+          ...(subjectPreamble ? { subject_preamble: subjectPreamble } : {}),
+        },
       });
 
       if (error) {
@@ -334,7 +378,7 @@ server.registerTool(
       }
 
       const meta = metadata as Record<string, unknown>;
-      let confirmation = `Captured as ${meta.type || "thought"}`;
+      let confirmation = `Captured as ${meta.type || "thought"} for ${capturedBy}`;
       if (Array.isArray(meta.topics) && meta.topics.length)
         confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
       if (Array.isArray(meta.people) && meta.people.length)
@@ -363,6 +407,12 @@ app.all("*", async (c) => {
     return c.json({ error: "Invalid or missing access key" }, 401);
   }
 
+  // Resolve cognate from the presented key. Legitimate keys not in the cognate map
+  // (e.g. MCP_ACCESS_KEY primary, or pre-cognate-map service keys) render as "unknown"
+  // until start.sh registers them. This is failure-visible: the stamped thought shows
+  // which keys need mapping without rejecting the capture.
+  const capturedBy = cognateKeyMap.get(provided) || "unknown";
+
   // Detect whether client supports SSE (Streamable HTTP).
   // Some MCP clients may not send Accept: text/event-stream (the MCP spec
   // requires it, but @hono/mcp's enforcement is stricter than some clients
@@ -388,8 +438,12 @@ app.all("*", async (c) => {
     };
   }
 
-  await server.connect(transport);
-  return transport.handleRequest(c);
+  // Propagate cognate identity through to MCP tool handlers via AsyncLocalStorage.
+  // capture_thought reads cognateStore.getStore() to stamp metadata.captured_by.
+  return await cognateStore.run(capturedBy, async () => {
+    await server.connect(transport);
+    return transport.handleRequest(c);
+  });
 });
 
 Deno.serve({ port: PORT, hostname: "0.0.0.0" }, app.fetch);

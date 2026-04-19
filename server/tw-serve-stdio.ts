@@ -20,6 +20,19 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
   Deno.exit(1);
 }
 
+// Cognate identity — set by the MCP dispatcher from the per-clone .tw-cognate file.
+// Process isolation is the auth boundary: each cognate's clone spawns its own stdio server
+// process, so this env var cannot be spoofed from the client side.
+const OB1_COGNATE = (Deno.env.get("OB1_COGNATE") || "unknown").toLowerCase();
+
+// Extract the first [Bracket Tag] token from content as the subject preamble.
+// Distinguishes "who wrote this" (server-stamped captured_by) from "what this is about"
+// (client-authored subject_preamble). Cross-reference is expected in the meta-pair workflow.
+function extractSubjectPreamble(content: string): string | null {
+  const match = content.match(/^\s*\[([^\]]+)\]/);
+  return match ? match[1].trim() : null;
+}
+
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
@@ -116,6 +129,7 @@ server.registerTool(
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
+            `By: ${m.captured_by || "unknown"}`,
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
@@ -180,7 +194,8 @@ server.registerTool(
         (t: { content: string; metadata: Record<string, unknown>; created_at: string }, i: number) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
+          const by = m.captured_by ? ` by ${m.captured_by}` : "";
+          return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}${by}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
         }
       );
       const dupNote = data.length > deduped.length ? ` (${data.length - deduped.length} duplicate row(s) collapsed)` : "";
@@ -238,10 +253,20 @@ server.registerTool(
   async ({ content }) => {
     try {
       const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
-      const { error } = await supabase.from("thoughts").insert({ content, embedding, metadata: { ...metadata, source: "mcp" } });
+      const subjectPreamble = extractSubjectPreamble(content);
+      const { error } = await supabase.from("thoughts").insert({
+        content,
+        embedding,
+        metadata: {
+          ...metadata,
+          source: "mcp",
+          captured_by: OB1_COGNATE,
+          ...(subjectPreamble ? { subject_preamble: subjectPreamble } : {}),
+        },
+      });
       if (error) return { content: [{ type: "text" as const, text: `Failed to capture: ${error.message}` }], isError: true };
       const meta = metadata as Record<string, unknown>;
-      let confirmation = `Captured as ${meta.type || "thought"}`;
+      let confirmation = `Captured as ${meta.type || "thought"} for ${OB1_COGNATE}`;
       if (Array.isArray(meta.topics) && meta.topics.length) confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
       if (Array.isArray(meta.people) && meta.people.length) confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
       if (Array.isArray(meta.action_items) && meta.action_items.length) confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
