@@ -147,7 +147,11 @@ server.registerTool(
   },
   async ({ limit, type, topic, person, days }) => {
     try {
-      let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(limit);
+      // Fetch 3x requested limit to allow for dedup without shortchanging the result.
+      // Same content posted under different metadata type/topic categorizations
+      // creates duplicate rows; we collapse them to the most recent instance.
+      const fetchLimit = Math.max(limit * 3, 30);
+      let q = supabase.from("thoughts").select("content, metadata, created_at").order("created_at", { ascending: false }).limit(fetchLimit);
       if (type) q = q.contains("metadata", { type });
       if (topic) q = q.contains("metadata", { topics: [topic] });
       if (person) q = q.contains("metadata", { people: [person] });
@@ -159,14 +163,28 @@ server.registerTool(
       const { data, error } = await q;
       if (error) return { content: [{ type: "text" as const, text: `Error: ${error.message}` }], isError: true };
       if (!data || !data.length) return { content: [{ type: "text" as const, text: "No thoughts found." }] };
-      const results = data.map(
+
+      // Dedup by content — keep the most recent occurrence (first, since order DESC).
+      // Normalize whitespace so near-identical content collapses too.
+      const seen = new Set<string>();
+      const deduped: typeof data = [];
+      for (const t of data) {
+        const key = t.content.replace(/\s+/g, " ").trim();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(t);
+        if (deduped.length >= limit) break;
+      }
+
+      const results = deduped.map(
         (t: { content: string; metadata: Record<string, unknown>; created_at: string }, i: number) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
           return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
         }
       );
-      return { content: [{ type: "text" as const, text: `${data.length} recent thought(s):\n\n${results.join("\n\n")}` }] };
+      const dupNote = data.length > deduped.length ? ` (${data.length - deduped.length} duplicate row(s) collapsed)` : "";
+      return { content: [{ type: "text" as const, text: `${deduped.length} recent thought(s)${dupNote}:\n\n${results.join("\n\n")}` }] };
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
     }
