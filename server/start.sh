@@ -19,10 +19,11 @@ GABE_KEY="$(vault kv get -field=GABE_OB1_KEY kv/services/ob1/mcp)"
 CODE_KEY="$(vault kv get -field=CODE_OB1_KEY kv/services/ob1/mcp)"
 CODEX_KEY="$(vault kv get -field=CODEX_OB1_KEY kv/services/ob1/mcp)"
 CURSOR_KEY="$(vault kv get -field=CURSOR_OB1_KEY kv/services/ob1/mcp)"
+HERMES_KEY="$(vault kv get -field=HERMES_OB1_KEY kv/services/ob1/mcp)"
 LINEAR_C_KEY="$(vault kv get -field=LINEAR_C_OB1_KEY kv/services/ob1/mcp)"
 
 # Flat set for backwards-compat auth (server checks membership only).
-export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY},${CURSOR_KEY},${LINEAR_C_KEY}"
+export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY},${CURSOR_KEY},${HERMES_KEY},${LINEAR_C_KEY}"
 
 # Structured cognate→key map for server-side attribution stamping (captured_by).
 # Server inverts this to a key→cognate lookup at startup so middleware can derive
@@ -34,8 +35,9 @@ export OB1_COGNATE_KEYS=$(jq -n \
   --arg code "$CODE_KEY" \
   --arg codex "$CODEX_KEY" \
   --arg cursor "$CURSOR_KEY" \
+  --arg hermes "$HERMES_KEY" \
   --arg linear_c "$LINEAR_C_KEY" \
-  '{glasswork:$glasswork, ember:$ember, gabe:$gabe, code:$code, codex:$codex, cursor:$cursor, "linear-c":$linear_c}')
+  '{glasswork:$glasswork, ember:$ember, gabe:$gabe, code:$code, codex:$codex, cursor:$cursor, hermes:$hermes, "linear-c":$linear_c}')
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENO="$HOME/.deno/bin/deno"
