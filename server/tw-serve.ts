@@ -400,6 +400,18 @@ server.registerTool(
 
 const app = new Hono();
 
+app.get("/api/whoami", (c) => {
+  const bearer = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
+  const provided = c.req.header("x-brain-key") || bearer || new URL(c.req.url).searchParams.get("key");
+  if (!provided || !OB1_VALID_KEYS.has(provided)) {
+    return c.json({ error: "Invalid or missing access key", authenticated: false }, 401);
+  }
+  return c.json({
+    authenticated: true,
+    cognate: cognateKeyMap.get(provided) || "unknown",
+  });
+});
+
 app.all("*", async (c) => {
   const bearer = c.req.header("authorization")?.replace(/^Bearer\s+/i, "");
   const provided = c.req.header("x-brain-key") || bearer || new URL(c.req.url).searchParams.get("key");
