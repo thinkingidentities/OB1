@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
 # OB1 Open Brain MCP Server — start script
 # Reads all secrets from Vault, never from .env files.
+#
+# Vault auth (TWC-3271): self-authenticate via a cognate-scoped AppRole login —
+# a pure vault call, exactly like the rest of the TW service fleet. Do NOT rely
+# on an ambient ~/.vault-token file: systemd never provisions it, so bare
+# `vault kv get` returns 403 and the service crash-loops the moment its
+# hand-started process is restarted or the box reboots. Seat is `code` because
+# OB1 is Code-owned infrastructure (the code AppRole has read on kv/services/ob1/*).
 set -euo pipefail
 
-VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
-export VAULT_ADDR
+export TW_SERVICE_NAME="ob1"
+export VAULT_ADDR="${VAULT_ADDR:-http://127.0.0.1:8200}"
+export TW_VAULT_APPROLE_NAME="${TW_VAULT_APPROLE_NAME:-code}"
 
-# Read secrets from Vault (opaque — never echo values)
-export SUPABASE_URL="$(vault kv get -field=SUPABASE_URL kv/services/ob1/supabase)"
-export SUPABASE_SERVICE_ROLE_KEY="$(vault kv get -field=SUPABASE_SECRET_KEY kv/services/ob1/supabase)"
-export OPENROUTER_API_KEY="$(vault kv get -field=OPENROUTER_API_KEY kv/services/ob1/openrouter)"
-export MCP_ACCESS_KEY="$(vault kv get -field=MCP_ACCESS_KEY kv/services/ob1/mcp)"
+EP5_ROOT="${EP5_ROOT:-/home/jim00/ep5}"
+# shellcheck source=/dev/null
+source "${EP5_ROOT}/lib/tw-vault-bootstrap.sh"
+
+tw_vault_wait
+tw_vault_approle_login
+
+# Read secrets from Vault (opaque — never echo values; gotcha-proof exports)
+tw_vault_export SUPABASE_URL              "kv/services/ob1/supabase"   "SUPABASE_URL"
+tw_vault_export SUPABASE_SERVICE_ROLE_KEY "kv/services/ob1/supabase"   "SUPABASE_SECRET_KEY"
+tw_vault_export OPENROUTER_API_KEY        "kv/services/ob1/openrouter" "OPENROUTER_API_KEY"
+tw_vault_export MCP_ACCESS_KEY            "kv/services/ob1/mcp"        "MCP_ACCESS_KEY"
 
 # Per-cognate keys
-GLASSWORK_KEY="$(vault kv get -field=GLASSWORK_OB1_KEY kv/services/ob1/mcp)"
-EMBER_KEY="$(vault kv get -field=EMBER_OB1_KEY kv/services/ob1/mcp)"
-GABE_KEY="$(vault kv get -field=GABE_OB1_KEY kv/services/ob1/mcp)"
-CODE_KEY="$(vault kv get -field=CODE_OB1_KEY kv/services/ob1/mcp)"
-CODEX_KEY="$(vault kv get -field=CODEX_OB1_KEY kv/services/ob1/mcp)"
-CURSOR_KEY="$(vault kv get -field=CURSOR_OB1_KEY kv/services/ob1/mcp)"
-HERMES_KEY="$(vault kv get -field=HERMES_OB1_KEY kv/services/ob1/mcp)"
-LINEAR_C_KEY="$(vault kv get -field=LINEAR_C_OB1_KEY kv/services/ob1/mcp)"
+tw_vault_export GLASSWORK_KEY "kv/services/ob1/mcp" "GLASSWORK_OB1_KEY"
+tw_vault_export EMBER_KEY     "kv/services/ob1/mcp" "EMBER_OB1_KEY"
+tw_vault_export GABE_KEY      "kv/services/ob1/mcp" "GABE_OB1_KEY"
+tw_vault_export CODE_KEY      "kv/services/ob1/mcp" "CODE_OB1_KEY"
+tw_vault_export CODEX_KEY     "kv/services/ob1/mcp" "CODEX_OB1_KEY"
+tw_vault_export CURSOR_KEY    "kv/services/ob1/mcp" "CURSOR_OB1_KEY"
+tw_vault_export HERMES_KEY    "kv/services/ob1/mcp" "HERMES_OB1_KEY"
+tw_vault_export LINEAR_C_KEY  "kv/services/ob1/mcp" "LINEAR_C_OB1_KEY"
 
 # Flat set for backwards-compat auth (server checks membership only).
 export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY},${CURSOR_KEY},${HERMES_KEY},${LINEAR_C_KEY}"
@@ -44,7 +59,7 @@ DENO="$HOME/.deno/bin/deno"
 
 export OB1_PORT="${OB1_PORT:-3037}"
 
-echo "[ob1] Starting OB1 MCP server on port $OB1_PORT..."
+tw_log "Starting OB1 MCP server on port $OB1_PORT..."
 exec "$DENO" run \
   --allow-net \
   --allow-env \
