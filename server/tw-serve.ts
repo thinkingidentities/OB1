@@ -43,7 +43,22 @@ const cognateKeyMap: Map<string, string> = (() => {
 // to the MCP tool handlers. MCP handlers don't receive Hono context, so we can't
 // use c.set/c.get — AsyncLocalStorage is the standard Deno/Node mechanism for
 // request-scoped identity propagation across async boundaries.
-const cognateStore = new AsyncLocalStorage<string>();
+// Request-scoped seat identity. `seat` is the resolved cognate name (or "service"
+// for a valid-but-unmapped key — never "unknown"); `mapped` says whether the key
+// resolved to a named cognate in OB1_COGNATE_KEYS.
+interface SeatInfo {
+  seat: string;
+  mapped: boolean;
+}
+const cognateStore = new AsyncLocalStorage<SeatInfo>();
+
+// Resolve the seat for a presented key. A valid key that isn't in the cognate map
+// (e.g. the primary MCP_ACCESS_KEY or an automation/service key) resolves to
+// "service" with mapped=false — failure-visible, but never a blank/"unknown" stamp.
+function resolveSeat(providedKey: string): SeatInfo {
+  const mapped = cognateKeyMap.get(providedKey);
+  return { seat: mapped || "service", mapped: Boolean(mapped) };
+}
 
 // Extract the first [Bracket Tag] token from content as the subject preamble.
 // Distinguishes "who wrote this" (server-stamped captured_by) from "what this is about"
@@ -51,6 +66,24 @@ const cognateStore = new AsyncLocalStorage<string>();
 function extractSubjectPreamble(content: string): string | null {
   const match = content.match(/^\s*\[([^\]]+)\]/);
   return match ? match[1].trim() : null;
+}
+
+// Canonical cognate seats recognized for content-author reconciliation.
+const KNOWN_COGNATES = new Set([
+  "code", "ember", "gabe", "glasswork", "gradient",
+  "codex", "cursor", "hermes", "linear-c", "jim", "cairn",
+]);
+
+// Parse a content-declared author from the leading [Cognate ...] preamble.
+//   "[Code 🔧 Mac] ..." -> "code"     "[a24-fingerprint] ..." -> null (not a cognate)
+// Returns the canonical cognate name when the first token of the first bracket tag
+// names a known cognate. Lets capture_thought record who *wrote* content that may be
+// *relayed* through a different seat's key (e.g. Code content pasted via Ember).
+function extractAuthoredBy(content: string): string | null {
+  const preamble = extractSubjectPreamble(content);
+  if (!preamble) return null;
+  const firstToken = preamble.split(/[\s/,|]/)[0]?.toLowerCase().trim();
+  return firstToken && KNOWN_COGNATES.has(firstToken) ? firstToken : null;
 }
 
 const PORT = parseInt(Deno.env.get("OB1_PORT") || "3037");
@@ -162,10 +195,11 @@ server.registerTool(
           i: number
         ) => {
           const m = t.metadata || {};
+          const relay = m.authored_by && m.authored_by !== m.captured_by ? ` (relay for ${m.authored_by})` : "";
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
-            `By: ${m.captured_by || "unknown"}`,
+            `By: ${m.captured_by || "unknown"}${relay}`,
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length)
@@ -247,7 +281,8 @@ server.registerTool(
         ) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          const by = m.captured_by ? ` by ${m.captured_by}` : "";
+          const relay = m.authored_by && m.authored_by !== m.captured_by ? ` (relay for ${m.authored_by})` : "";
+          const by = m.captured_by ? ` by ${m.captured_by}${relay}` : "";
           return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}${by}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
         }
       );
@@ -347,17 +382,43 @@ server.registerTool(
       "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically.",
     inputSchema: {
       content: z.string().describe("The thought to capture"),
+      assert_seat: z
+        .string()
+        .optional()
+        .describe(
+          "Optional. If set, the capture is rejected unless it matches the seat this connection is authenticated as. Guards against mis-attributed captures — call whoami first if unsure."
+        ),
     },
   },
-  async ({ content }) => {
+  async ({ content, assert_seat }) => {
     try {
+      const seatInfo = cognateStore.getStore();
+      const capturedBy = seatInfo?.seat || "unknown";
+      const seatMapped = seatInfo?.mapped ?? false;
+
+      // T4 — capture-time seat assertion. Fail loudly rather than mis-stamp.
+      if (assert_seat && assert_seat.toLowerCase().trim() !== capturedBy.toLowerCase()) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Seat assertion failed: you asserted "${assert_seat}" but this connection is authenticated as "${capturedBy}". Capture rejected — nothing was written.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
       const [embedding, metadata] = await Promise.all([
         getEmbedding(content),
         extractMetadata(content),
       ]);
 
-      const capturedBy = cognateStore.getStore() || "unknown";
       const subjectPreamble = extractSubjectPreamble(content);
+      // Reconcile the transport seat (captured_by) with the content-declared author.
+      // When they diverge, this is a relay (e.g. Code content pushed through Ember's key).
+      const authoredBy = extractAuthoredBy(content);
+      const isRelay = Boolean(authoredBy && authoredBy !== capturedBy);
 
       const { error } = await supabase.from("thoughts").insert({
         content,
@@ -366,7 +427,10 @@ server.registerTool(
           ...metadata,
           source: "mcp",
           captured_by: capturedBy,
+          ...(seatMapped ? {} : { seat_unmapped: true }),
           ...(subjectPreamble ? { subject_preamble: subjectPreamble } : {}),
+          ...(authoredBy ? { authored_by: authoredBy } : {}),
+          ...(isRelay ? { relay: true } : {}),
         },
       });
 
@@ -379,6 +443,8 @@ server.registerTool(
 
       const meta = metadata as Record<string, unknown>;
       let confirmation = `Captured as ${meta.type || "thought"} for ${capturedBy}`;
+      if (isRelay) confirmation += ` (relay for ${authoredBy})`;
+      if (!seatMapped) confirmation += ` [seat unmapped — register this key in OB1_COGNATE_KEYS]`;
       if (Array.isArray(meta.topics) && meta.topics.length)
         confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
       if (Array.isArray(meta.people) && meta.people.length)
@@ -398,6 +464,30 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "whoami",
+  {
+    title: "Who Am I",
+    description:
+      "Return the cognate seat this OB1 connection is authenticated as. Call before capture_thought to verify your attribution — captures are stamped with this seat.",
+    inputSchema: {},
+  },
+  // deno-lint-ignore require-await
+  async () => {
+    const info = cognateStore.getStore();
+    const seat = info?.seat || "unknown";
+    const mapped = info?.mapped ?? false;
+    const note = mapped
+      ? `Authenticated as "${seat}". Captures will be stamped captured_by=${seat}.`
+      : `Key is valid but not mapped to a named cognate (seat="${seat}", mapped=false). Captures will be stamped captured_by=${seat} with seat_unmapped=true. Register this key in OB1_COGNATE_KEYS to attribute it to a named seat.`;
+    return {
+      content: [
+        { type: "text" as const, text: `${JSON.stringify({ seat, mapped }, null, 2)}\n\n${note}` },
+      ],
+    };
+  }
+);
+
 const app = new Hono();
 
 app.get("/api/whoami", (c) => {
@@ -406,10 +496,8 @@ app.get("/api/whoami", (c) => {
   if (!provided || !OB1_VALID_KEYS.has(provided)) {
     return c.json({ error: "Invalid or missing access key", authenticated: false }, 401);
   }
-  return c.json({
-    authenticated: true,
-    cognate: cognateKeyMap.get(provided) || "unknown",
-  });
+  const { seat, mapped } = resolveSeat(provided);
+  return c.json({ authenticated: true, cognate: seat, mapped });
 });
 
 app.all("*", async (c) => {
@@ -420,10 +508,11 @@ app.all("*", async (c) => {
   }
 
   // Resolve cognate from the presented key. Legitimate keys not in the cognate map
-  // (e.g. MCP_ACCESS_KEY primary, or pre-cognate-map service keys) render as "unknown"
-  // until start.sh registers them. This is failure-visible: the stamped thought shows
-  // which keys need mapping without rejecting the capture.
-  const capturedBy = cognateKeyMap.get(provided) || "unknown";
+  // (e.g. MCP_ACCESS_KEY primary, or automation/service keys) resolve to seat="service"
+  // with mapped=false — never a blank/"unknown" stamp. This is failure-visible: the
+  // stamped thought carries seat_unmapped=true so which keys need mapping is queryable,
+  // without rejecting the capture.
+  const seatInfo = resolveSeat(provided);
 
   // Detect whether client supports SSE (Streamable HTTP).
   // Some MCP clients may not send Accept: text/event-stream (the MCP spec
@@ -452,7 +541,7 @@ app.all("*", async (c) => {
 
   // Propagate cognate identity through to MCP tool handlers via AsyncLocalStorage.
   // capture_thought reads cognateStore.getStore() to stamp metadata.captured_by.
-  return await cognateStore.run(capturedBy, async () => {
+  return await cognateStore.run(seatInfo, async () => {
     await server.connect(transport);
     return transport.handleRequest(c);
   });

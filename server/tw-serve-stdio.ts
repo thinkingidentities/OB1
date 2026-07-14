@@ -22,8 +22,12 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !OPENROUTER_API_KEY) {
 
 // Cognate identity — set by the MCP dispatcher from the per-clone .tw-cognate file.
 // Process isolation is the auth boundary: each cognate's clone spawns its own stdio server
-// process, so this env var cannot be spoofed from the client side.
-const OB1_COGNATE = (Deno.env.get("OB1_COGNATE") || "unknown").toLowerCase();
+// process, so this env var cannot be spoofed from the client side. When OB1_COGNATE is
+// unset we resolve to "service" (mapped=false) rather than "unknown" so no capture lands
+// with blank/unknown provenance.
+const RAW_COGNATE = Deno.env.get("OB1_COGNATE");
+const OB1_COGNATE = (RAW_COGNATE || "service").toLowerCase();
+const OB1_SEAT_MAPPED = Boolean(RAW_COGNATE) && OB1_COGNATE !== "unknown" && OB1_COGNATE !== "service";
 
 // Extract the first [Bracket Tag] token from content as the subject preamble.
 // Distinguishes "who wrote this" (server-stamped captured_by) from "what this is about"
@@ -31,6 +35,23 @@ const OB1_COGNATE = (Deno.env.get("OB1_COGNATE") || "unknown").toLowerCase();
 function extractSubjectPreamble(content: string): string | null {
   const match = content.match(/^\s*\[([^\]]+)\]/);
   return match ? match[1].trim() : null;
+}
+
+// Canonical cognate seats recognized for content-author reconciliation.
+const KNOWN_COGNATES = new Set([
+  "code", "ember", "gabe", "glasswork", "gradient",
+  "codex", "cursor", "hermes", "linear-c", "jim", "cairn",
+]);
+
+// Parse a content-declared author from the leading [Cognate ...] preamble.
+//   "[Code 🔧 Mac] ..." -> "code"     "[a24-fingerprint] ..." -> null (not a cognate)
+// Lets capture_thought record who *wrote* content that may be *relayed* through a
+// different seat (e.g. Code content pasted via Ember).
+function extractAuthoredBy(content: string): string | null {
+  const preamble = extractSubjectPreamble(content);
+  if (!preamble) return null;
+  const firstToken = preamble.split(/[\s/,|]/)[0]?.toLowerCase().trim();
+  return firstToken && KNOWN_COGNATES.has(firstToken) ? firstToken : null;
 }
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
@@ -126,10 +147,11 @@ server.registerTool(
       const results = data.map(
         (t: { content: string; metadata: Record<string, unknown>; similarity: number; created_at: string }, i: number) => {
           const m = t.metadata || {};
+          const relay = m.authored_by && m.authored_by !== m.captured_by ? ` (relay for ${m.authored_by})` : "";
           const parts = [
             `--- Result ${i + 1} (${(t.similarity * 100).toFixed(1)}% match) ---`,
             `Captured: ${new Date(t.created_at).toLocaleDateString()}`,
-            `By: ${m.captured_by || "unknown"}`,
+            `By: ${m.captured_by || "unknown"}${relay}`,
             `Type: ${m.type || "unknown"}`,
           ];
           if (Array.isArray(m.topics) && m.topics.length) parts.push(`Topics: ${(m.topics as string[]).join(", ")}`);
@@ -194,7 +216,8 @@ server.registerTool(
         (t: { content: string; metadata: Record<string, unknown>; created_at: string }, i: number) => {
           const m = t.metadata || {};
           const tags = Array.isArray(m.topics) ? (m.topics as string[]).join(", ") : "";
-          const by = m.captured_by ? ` by ${m.captured_by}` : "";
+          const relay = m.authored_by && m.authored_by !== m.captured_by ? ` (relay for ${m.authored_by})` : "";
+          const by = m.captured_by ? ` by ${m.captured_by}${relay}` : "";
           return `${i + 1}. [${new Date(t.created_at).toLocaleDateString()}${by}] (${m.type || "??"}${tags ? " - " + tags : ""})\n   ${t.content}`;
         }
       );
@@ -248,12 +271,26 @@ server.registerTool(
     description: "Save a new thought to the Open Brain. Generates an embedding and extracts metadata automatically.",
     inputSchema: {
       content: z.string().describe("The thought to capture — a clear, standalone statement that will make sense when retrieved later by any AI"),
+      assert_seat: z
+        .string()
+        .optional()
+        .describe("Optional. If set, the capture is rejected unless it matches the seat this process is authenticated as. Call whoami first if unsure."),
     },
   },
-  async ({ content }) => {
+  async ({ content, assert_seat }) => {
     try {
+      // T4 — capture-time seat assertion. Fail loudly rather than mis-stamp.
+      if (assert_seat && assert_seat.toLowerCase().trim() !== OB1_COGNATE.toLowerCase()) {
+        return {
+          content: [{ type: "text" as const, text: `Seat assertion failed: you asserted "${assert_seat}" but this process is authenticated as "${OB1_COGNATE}". Capture rejected — nothing was written.` }],
+          isError: true,
+        };
+      }
       const [embedding, metadata] = await Promise.all([getEmbedding(content), extractMetadata(content)]);
       const subjectPreamble = extractSubjectPreamble(content);
+      // Reconcile transport seat (captured_by) with content-declared author; diverging = relay.
+      const authoredBy = extractAuthoredBy(content);
+      const isRelay = Boolean(authoredBy && authoredBy !== OB1_COGNATE);
       const { error } = await supabase.from("thoughts").insert({
         content,
         embedding,
@@ -261,12 +298,17 @@ server.registerTool(
           ...metadata,
           source: "mcp",
           captured_by: OB1_COGNATE,
+          ...(OB1_SEAT_MAPPED ? {} : { seat_unmapped: true }),
           ...(subjectPreamble ? { subject_preamble: subjectPreamble } : {}),
+          ...(authoredBy ? { authored_by: authoredBy } : {}),
+          ...(isRelay ? { relay: true } : {}),
         },
       });
       if (error) return { content: [{ type: "text" as const, text: `Failed to capture: ${error.message}` }], isError: true };
       const meta = metadata as Record<string, unknown>;
       let confirmation = `Captured as ${meta.type || "thought"} for ${OB1_COGNATE}`;
+      if (isRelay) confirmation += ` (relay for ${authoredBy})`;
+      if (!OB1_SEAT_MAPPED) confirmation += ` [seat unmapped — set OB1_COGNATE]`;
       if (Array.isArray(meta.topics) && meta.topics.length) confirmation += ` — ${(meta.topics as string[]).join(", ")}`;
       if (Array.isArray(meta.people) && meta.people.length) confirmation += ` | People: ${(meta.people as string[]).join(", ")}`;
       if (Array.isArray(meta.action_items) && meta.action_items.length) confirmation += ` | Actions: ${(meta.action_items as string[]).join("; ")}`;
@@ -274,6 +316,24 @@ server.registerTool(
     } catch (err: unknown) {
       return { content: [{ type: "text" as const, text: `Error: ${(err as Error).message}` }], isError: true };
     }
+  }
+);
+
+server.registerTool(
+  "whoami",
+  {
+    title: "Who Am I",
+    description: "Return the cognate seat this OB1 connection is authenticated as. Call before capture_thought to verify your attribution — captures are stamped with this seat.",
+    inputSchema: {},
+  },
+  // deno-lint-ignore require-await
+  async () => {
+    const note = OB1_SEAT_MAPPED
+      ? `Authenticated as "${OB1_COGNATE}". Captures will be stamped captured_by=${OB1_COGNATE}.`
+      : `OB1_COGNATE is not set to a named cognate (seat="${OB1_COGNATE}", mapped=false). Captures will be stamped captured_by=${OB1_COGNATE} with seat_unmapped=true. Set OB1_COGNATE in the launch wrapper to attribute this process to a named seat.`;
+    return {
+      content: [{ type: "text" as const, text: `${JSON.stringify({ seat: OB1_COGNATE, mapped: OB1_SEAT_MAPPED }, null, 2)}\n\n${note}` }],
+    };
   }
 );
 
