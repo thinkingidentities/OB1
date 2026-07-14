@@ -16,27 +16,27 @@ This is a TrustedWork fork of [NateBJones-Projects/OB1](https://github.com/NateB
 ## Branch Model
 
 ```
-main          ← Tracks upstream. No direct commits. Sync via: git fetch upstream && git merge upstream/main
-tw/main       ← TW integration branch. All TW work merges here.
-tw/<topic>    ← Feature branches for TW work. PR into tw/main.
-contrib/*     ← Upstream contribution branches. Branch off main, PR to NateBJones.
+main                       ← TW trunk on our fork. All TW work merges here via PR.
+feat|fix|chore/twc-NNNN-*  ← Work branches, PRed into main. Named by ThinkJob.
+contrib/*                  ← (rare) Upstream contribution branches, PR to NateBJones.
 ```
 
 ### Rules
 
-1. **`main` is read-only.** No direct commits. It exists solely to track upstream.
-2. **`tw/main` is the TW working trunk.** All TW-specific work lands here via PR.
-3. **Feature work** goes on `tw/<topic>` branches, PRed into `tw/main`.
-4. **Upstream contributions** branch off `main` (not `tw/main`), keeping them clean of TW-specific changes.
-5. **Upstream sync:** `git fetch upstream && git checkout main && git merge upstream/main && git push origin main`. Then rebase `tw/main` if needed.
+1. **`main` is the TW trunk** on our fork `thinkingidentities/OB1`. All TW work lands here via PR — branch protection requires a PR (no direct push). Standard PR merges (see PRs #7–#10).
+2. **Work branches** are `feat|fix|chore/twc-NNNN-description`, matching the driving ThinkJob, PRed into `main`.
+3. **Upstream (`NateBJones-Projects/OB1`) is never modified by us.** We do not push to it. A future upstream contribution would use a `contrib/*` branch off a clean upstream sync and PR to NateBJones — not yet exercised.
+4. **Upstream sync (if ever needed):** fetch upstream into a temp branch and merge deliberately; do NOT treat `main` as a read-only upstream mirror — it is our trunk and diverges from upstream.
+
+> Historical note: an earlier version described a `main=upstream-read-only / tw/main=trunk` model. It was never adopted — all TW PRs merge to `main` on the fork. Corrected 2026-07-14 (TWC-3528).
 
 ### Branch Naming
 
 ```
-tw/supabase-setup       ← TW feature work
-tw/mcp-integration      ← TW feature work
-tw/postgres-port        ← TW adaptation
-contrib/twdevjim/...    ← Upstream contribution (follows NateBJones convention)
+feat/twc-NNNN-description    ← new capability
+fix/twc-NNNN-description     ← bug fix
+chore/twc-NNNN-description   ← ops, docs, cleanup
+contrib/...                  ← (rare) upstream contribution (follows NateBJones convention)
 ```
 
 ### Commit Messages
@@ -64,9 +64,9 @@ chore: description [TWC-NNNN]
 
 OB1 uses **lightweight governance** — no ThinkJob packets or External RAM threads required per branch. The Linear project and issue hierarchy provide sufficient traceability.
 
-- Create a `tw/<topic>` branch for each piece of work
+- Create a `feat|fix|chore/twc-NNNN-description` branch for each piece of work
 - Reference the TWC issue number in commits
-- PR into `tw/main` with a clear description
+- PR into `main` with a clear description
 - No worktree ceremony required (single-cognate repo for now)
 
 If OB1 grows to multi-cognate writes, escalate to full ThinkJob governance.
@@ -103,9 +103,9 @@ From the upstream `CLAUDE.md` — these apply to ALL branches:
 
 ### OB1 MCP Server
 - **Port:** 3037
-- **systemd:** `tw-ob1.service` (user)
-- **Entrypoint:** `server/tw-serve.ts` (TW wrapper, configurable port via OB1_PORT)
-- **Auth:** `x-brain-key` header, key from `kv/services/ob1/mcp`
+- **systemd:** `tw-ob1-mcp.service` (user) — restart via `systemctl --user restart tw-ob1-mcp.service`
+- **Entrypoint:** `server/tw-serve.ts` (HTTP, TW wrapper, configurable port via OB1_PORT). Local stdio callers use `server/tw-serve-stdio.ts` (same tools; seat from `OB1_COGNATE` env). Keep the two files in sync.
+- **Auth:** `x-brain-key` header (or `Bearer` / `?key=`), key from `kv/services/ob1/mcp`
 - **Start:** `bash server/start.sh` (reads Vault, no .env)
 
 ### Vault Paths
@@ -114,10 +114,21 @@ From the upstream `CLAUDE.md` — these apply to ALL branches:
 - `kv/services/ob1/mcp` — MCP_ACCESS_KEY
 
 ### MCP Tools
-- `capture_thought` — Save a thought (auto-embeds + extracts metadata via OpenRouter)
+- `capture_thought` — Save a thought (auto-embeds + extracts metadata via OpenRouter). Optional `assert_seat` rejects the capture pre-write if the asserted seat ≠ the authenticated seat.
 - `search_thoughts` — Semantic search by meaning (pgvector cosine similarity)
 - `list_thoughts` — List recent thoughts with filters (type, topic, person, days)
 - `thought_stats` — Summary statistics (counts, types, topics, people)
+- `whoami` — Return the cognate seat this connection is authenticated as: `{seat, mapped}`. Call before capturing to verify attribution.
+
+### Identity & Attribution (TWC-3519)
+
+OB1 stamps every capture with the caller's seat and is honest about relays:
+
+- **`captured_by`** — the authenticated seat. HTTP (`tw-serve.ts`) resolves it from the presented key via `cognateKeyMap` (built from `OB1_COGNATE_KEYS` in `start.sh`); stdio (`tw-serve-stdio.ts`) reads it from the `OB1_COGNATE` env var.
+- **Never blank** — a valid-but-unmapped key, or unset `OB1_COGNATE`, resolves to `seat="service"` with `mapped=false`, and the capture carries `seat_unmapped=true`. No silent `"unknown"`.
+- **Relay attribution** — `capture_thought` parses the leading `[Cognate …]` content preamble into `metadata.authored_by`. If it differs from `captured_by`, the row gets `relay=true` and `list`/`search` render `by X (relay for Y)`. So relaying another cognate's words is visible, not mis-stamped.
+- **Recognized cognates** — derived from the key map plus the `OB1_KNOWN_COGNATES` env var (comma-separated), injected at deploy time. Not hardcoded in source.
+- **`assert_seat`** — optional guard; see `capture_thought` above.
 
 ## Current Focus
 
