@@ -68,10 +68,13 @@ function extractSubjectPreamble(content: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-// Canonical cognate seats recognized for content-author reconciliation.
-const KNOWN_COGNATES = new Set([
-  "code", "ember", "gabe", "glasswork", "gradient",
-  "codex", "cursor", "hermes", "linear-c", "jim", "cairn",
+// Cognate seats recognized for content-author reconciliation. Derived from the
+// registered key map (never hardcoded); additional non-keyed seats — carbon Jim,
+// or cognates without an OB1 key — can be injected via OB1_KNOWN_COGNATES (comma-sep).
+const KNOWN_COGNATES = new Set<string>([
+  ...cognateKeyMap.values(),
+  ...(Deno.env.get("OB1_KNOWN_COGNATES") || "")
+    .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean),
 ]);
 
 // Parse a content-declared author from the leading [Cognate ...] preamble.
