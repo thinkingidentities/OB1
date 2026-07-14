@@ -43,6 +43,13 @@ export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${C
 # Structured cognate→key map for server-side attribution stamping (captured_by).
 # Server inverts this to a key→cognate lookup at startup so middleware can derive
 # the authenticated cognate from the presented Bearer/x-brain-key.
+#
+# Keys that are valid (in OB1_VALID_KEYS) but absent from this map — e.g. the primary
+# MCP_ACCESS_KEY or an automation caller — resolve at the server to seat="service"
+# with mapped=false, and their captures carry seat_unmapped=true. That is failure-
+# visible, never a blank/"unknown" stamp. To give an automation its own named seat
+# (e.g. a dedicated a24-sync key), add it to OB1_VALID_KEYS above and register it in
+# the jq object below.
 export OB1_COGNATE_KEYS=$(jq -n \
   --arg glasswork "$GLASSWORK_KEY" \
   --arg ember "$EMBER_KEY" \
