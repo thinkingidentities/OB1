@@ -60,7 +60,7 @@ const EXTRACT_PROMPT = `Extract metadata from the user's captured thought. Retur
 - "action_items": array of implied to-dos (empty if none)
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
+- "type": one of "observation", "task", "idea", "reference", "person_note", "experiential_memory"
 - "sentiment": one of "positive", "negative", "neutral", "mixed"
 Only extract what's explicitly there.`;
 
