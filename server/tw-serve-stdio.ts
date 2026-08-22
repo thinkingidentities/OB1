@@ -79,6 +79,23 @@ async function getEmbedding(text: string): Promise<number[]> {
   return d.data[0].embedding;
 }
 
+const THOUGHT_TYPES = ["observation", "task", "idea", "reference", "person_note", "experiential_memory"];
+
+function detectExplicitThoughtType(text: string): string | null {
+  const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (normalized.includes("experiential_memory")) return "experiential_memory";
+  return null;
+}
+
+function applyExplicitThoughtType(text: string, metadata: Record<string, unknown>): Record<string, unknown> {
+  const explicitType = detectExplicitThoughtType(text);
+  if (!explicitType) return metadata;
+  return {
+    ...metadata,
+    type: explicitType,
+  };
+}
+
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
@@ -97,7 +114,7 @@ async function extractMetadata(text: string): Promise<Record<string, unknown>> {
 - "action_items": array of implied to-dos (empty if none)
 - "dates_mentioned": array of dates YYYY-MM-DD (empty if none)
 - "topics": array of 1-3 short topic tags (always at least one)
-- "type": one of "observation", "task", "idea", "reference", "person_note"
+- "type": one of ${THOUGHT_TYPES.map((type) => `"${type}"`).join(", ")}
 Only extract what's explicitly there.`,
         },
         { role: "user", content: text },
@@ -106,9 +123,9 @@ Only extract what's explicitly there.`,
   });
   const d = await r.json();
   try {
-    return JSON.parse(d.choices[0].message.content);
+    return applyExplicitThoughtType(text, JSON.parse(d.choices[0].message.content));
   } catch {
-    return { topics: ["uncategorized"], type: "observation" };
+    return applyExplicitThoughtType(text, { topics: ["uncategorized"], type: "observation" });
   }
 }
 
@@ -177,7 +194,7 @@ server.registerTool(
     description: "List recently captured thoughts with optional filters by type, topic, person, or time range.",
     inputSchema: {
       limit: z.number().optional().default(10),
-      type: z.string().optional().describe("Filter by type: observation, task, idea, reference, person_note"),
+      type: z.string().optional().describe(`Filter by type: ${THOUGHT_TYPES.join(", ")}`),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
