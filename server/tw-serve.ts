@@ -131,6 +131,122 @@ function applyExplicitThoughtType(text: string, metadata: Record<string, unknown
   };
 }
 
+type EntityType = "person" | "seat" | "host" | "identifier" | "account";
+
+const ENTITY_GUARD_VERSION = "tw-entity-type-guard-v1";
+const PERSON_ALIASES = new Map([["jim", "Jim Meck"], ["jim meck", "Jim Meck"]]);
+const SEAT_ALIASES = new Map([
+  ["codex", "Codex"],
+  ["codex trace", "Codex"],
+  ["ember", "Ember"],
+  ["hermes", "Hermes"],
+  ["glasswork", "Glasswork"],
+  ["code", "Code"],
+  ["cursor", "Cursor"],
+  ["linear-c", "Linear-C"],
+]);
+const ACCOUNT_ALIASES = new Map([["gabe", "gabe"], ["twdevgabe", "twdevgabe"]]);
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function canonicalKey(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function textContainsAlias(text: string, alias: string): boolean {
+  return new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(text);
+}
+
+function identifiersInText(text: string): string[] {
+  return unique(text.match(/\b(?:[A-Z]{2,6}-)+(?:\d{1,6})\b/g) || []);
+}
+
+function hostsInText(text: string): string[] {
+  return unique(text.match(/\b(?:dgx|mac)-[a-z]+-\d+\b/gi) || []).map((value) =>
+    value.toLowerCase()
+  );
+}
+
+function classifyEntityCandidate(
+  rawValue: string,
+  textIdentifiers: string[],
+): { type: EntityType; value: string; reason: string } | null {
+  const raw = rawValue.trim();
+  if (!raw) return null;
+  const key = canonicalKey(raw);
+  const identifierPrefix = textIdentifiers.find((identifier) => identifier.startsWith(`${raw}-`));
+  if (identifierPrefix && /^[A-Z]{2,6}$/.test(raw)) {
+    return { type: "identifier", value: identifierPrefix, reason: "identifier_prefix" };
+  }
+  if (/^(?:[A-Z]{2,6}-)+(?:\d{1,6})$/.test(raw)) {
+    return { type: "identifier", value: raw, reason: "identifier_pattern" };
+  }
+  if (/^(dgx|mac)-[a-z]+-\d+$/i.test(raw)) {
+    return { type: "host", value: raw.toLowerCase(), reason: "host_pattern" };
+  }
+  const seat = SEAT_ALIASES.get(key);
+  if (seat) return { type: "seat", value: seat, reason: "seat_alias" };
+  const account = ACCOUNT_ALIASES.get(key);
+  if (account) return { type: "account", value: account, reason: "account_alias" };
+  const person = PERSON_ALIASES.get(key);
+  if (person) return { type: "person", value: person, reason: "person_alias" };
+  return { type: "person", value: raw, reason: "default_person" };
+}
+
+function normalizeExtractedEntities(text: string, metadata: Record<string, unknown>): Record<string, unknown> {
+  const originalPeople = Array.isArray(metadata.people) ? (metadata.people as unknown[]).filter((value): value is string => typeof value === "string") : [];
+  const textIdentifiers = identifiersInText(text);
+  const textHosts = hostsInText(text);
+  const entities: Record<EntityType, string[]> = {
+    person: [],
+    seat: [],
+    host: [...textHosts],
+    identifier: [...textIdentifiers],
+    account: [],
+  };
+  const corrections: Array<{ raw: string; type: EntityType; value: string; reason: string }> = [];
+
+  for (const [alias, value] of PERSON_ALIASES) {
+    if (textContainsAlias(text, alias)) entities.person.push(value);
+  }
+  for (const [alias, value] of SEAT_ALIASES) {
+    if (alias !== "code" && textContainsAlias(text, alias)) entities.seat.push(value);
+  }
+  for (const [alias, value] of ACCOUNT_ALIASES) {
+    if (textContainsAlias(text, alias)) entities.account.push(value);
+  }
+
+  for (const raw of originalPeople) {
+    const classified = classifyEntityCandidate(raw, textIdentifiers);
+    if (!classified) continue;
+    entities[classified.type].push(classified.value);
+    if (classified.value !== raw || classified.type !== "person" || classified.reason !== "default_person") {
+      corrections.push({ raw, ...classified });
+    }
+  }
+
+  for (const key of Object.keys(entities) as EntityType[]) {
+    entities[key] = unique(entities[key]);
+  }
+
+  return {
+    ...metadata,
+    people: entities.person,
+    entities,
+    entity_extraction: {
+      version: ENTITY_GUARD_VERSION,
+      original_people: originalPeople,
+      corrections,
+    },
+  };
+}
+
 async function extractMetadata(text: string): Promise<Record<string, unknown>> {
   const r = await fetch(`${OPENROUTER_BASE}/chat/completions`, {
     method: "POST",
@@ -158,9 +274,15 @@ Only extract what's explicitly there.`,
   });
   const d = await r.json();
   try {
-    return applyExplicitThoughtType(text, JSON.parse(d.choices[0].message.content));
+    return normalizeExtractedEntities(
+      text,
+      applyExplicitThoughtType(text, JSON.parse(d.choices[0].message.content)),
+    );
   } catch {
-    return applyExplicitThoughtType(text, { topics: ["uncategorized"], type: "observation" });
+    return normalizeExtractedEntities(
+      text,
+      applyExplicitThoughtType(text, { topics: ["uncategorized"], type: "observation" }),
+    );
   }
 }
 
@@ -261,10 +383,14 @@ server.registerTool(
       type: z.string().optional().describe(`Filter by type: ${THOUGHT_TYPES.join(", ")}`),
       topic: z.string().optional().describe("Filter by topic tag"),
       person: z.string().optional().describe("Filter by person mentioned"),
+      seat: z.string().optional().describe("Filter by seat entity"),
+      host: z.string().optional().describe("Filter by host entity"),
+      identifier: z.string().optional().describe("Filter by identifier entity"),
+      account: z.string().optional().describe("Filter by account entity"),
       days: z.number().optional().describe("Only thoughts from the last N days"),
     },
   },
-  async ({ limit, type, topic, person, days }) => {
+  async ({ limit, type, topic, person, seat, host, identifier, account, days }) => {
     try {
       let q = supabase
         .from("thoughts")
@@ -275,6 +401,10 @@ server.registerTool(
       if (type) q = q.contains("metadata", { type });
       if (topic) q = q.contains("metadata", { topics: [topic] });
       if (person) q = q.contains("metadata", { people: [person] });
+      if (seat) q = q.contains("metadata", { entities: { seat: [seat] } });
+      if (host) q = q.contains("metadata", { entities: { host: [host] } });
+      if (identifier) q = q.contains("metadata", { entities: { identifier: [identifier] } });
+      if (account) q = q.contains("metadata", { entities: { account: [account] } });
       if (days) {
         const since = new Date();
         since.setDate(since.getDate() - days);
@@ -345,6 +475,12 @@ server.registerTool(
       const types: Record<string, number> = {};
       const topics: Record<string, number> = {};
       const people: Record<string, number> = {};
+      const entityCounts: Record<string, Record<string, number>> = {
+        seat: {},
+        host: {},
+        identifier: {},
+        account: {},
+      };
 
       for (const r of data || []) {
         const m = (r.metadata || {}) as Record<string, unknown>;
@@ -353,6 +489,15 @@ server.registerTool(
           for (const t of m.topics) topics[t as string] = (topics[t as string] || 0) + 1;
         if (Array.isArray(m.people))
           for (const p of m.people) people[p as string] = (people[p as string] || 0) + 1;
+        const entities = m.entities as Record<string, unknown> | undefined;
+        for (const kind of Object.keys(entityCounts)) {
+          const values = entities?.[kind];
+          if (Array.isArray(values)) {
+            for (const value of values) {
+              entityCounts[kind][value as string] = (entityCounts[kind][value as string] || 0) + 1;
+            }
+          }
+        }
       }
 
       const sort = (o: Record<string, number>): [string, number][] =>
@@ -382,6 +527,11 @@ server.registerTool(
       if (Object.keys(people).length) {
         lines.push("", "People mentioned:");
         for (const [k, v] of sort(people)) lines.push(`  ${k}: ${v}`);
+      }
+      for (const [kind, counts] of Object.entries(entityCounts)) {
+        if (!Object.keys(counts).length) continue;
+        lines.push("", `${kind[0].toUpperCase()}${kind.slice(1)} entities:`);
+        for (const [k, v] of sort(counts)) lines.push(`  ${k}: ${v}`);
       }
 
       return { content: [{ type: "text" as const, text: lines.join("\n") }] };
