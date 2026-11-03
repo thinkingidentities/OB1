@@ -1,0 +1,3 @@
+== red: main server/start.sh
+FAIL claude-jim-web key present: claude-jim-web key not accepted; claude-jim-web resolves to service
+PASS claude-jim-web key absent (compatible)

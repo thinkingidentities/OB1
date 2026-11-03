@@ -1,0 +1,4 @@
+== green: branch server/start.sh
+PASS claude-jim-web key present
+PASS claude-jim-web key absent (compatible)
+exit=0
