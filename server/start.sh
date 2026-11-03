@@ -36,9 +36,13 @@ tw_vault_export CODEX_KEY     "kv/services/ob1/mcp" "CODEX_OB1_KEY"
 tw_vault_export CURSOR_KEY    "kv/services/ob1/mcp" "CURSOR_OB1_KEY"
 tw_vault_export HERMES_KEY    "kv/services/ob1/mcp" "HERMES_OB1_KEY"
 tw_vault_export LINEAR_C_KEY  "kv/services/ob1/mcp" "LINEAR_C_OB1_KEY"
+# claude-jim-web (TWC-5816): its own seat path, so root provisions it without
+# rewriting the shared mcp secret. Optional: when absent the value is empty, and
+# the server drops empty keys from both the accepted set and the cognate map.
+tw_vault_export_optional CLAUDE_JIM_WEB_KEY "kv/services/ob1/seats/claude-jim-web" "api_key" ""
 
 # Flat set for backwards-compat auth (server checks membership only).
-export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY},${CURSOR_KEY},${HERMES_KEY},${LINEAR_C_KEY}"
+export OB1_VALID_KEYS="${GLASSWORK_KEY},${EMBER_KEY},${GABE_KEY},${CODE_KEY},${CODEX_KEY},${CURSOR_KEY},${HERMES_KEY},${LINEAR_C_KEY},${CLAUDE_JIM_WEB_KEY}"
 
 # Structured cognate→key map for server-side attribution stamping (captured_by).
 # Server inverts this to a key→cognate lookup at startup so middleware can derive
@@ -59,7 +63,8 @@ export OB1_COGNATE_KEYS=$(jq -n \
   --arg cursor "$CURSOR_KEY" \
   --arg hermes "$HERMES_KEY" \
   --arg linear_c "$LINEAR_C_KEY" \
-  '{glasswork:$glasswork, ember:$ember, gabe:$gabe, code:$code, codex:$codex, cursor:$cursor, hermes:$hermes, "linear-c":$linear_c}')
+  --arg claude_jim_web "$CLAUDE_JIM_WEB_KEY" \
+  '{glasswork:$glasswork, ember:$ember, gabe:$gabe, code:$code, codex:$codex, cursor:$cursor, hermes:$hermes, "linear-c":$linear_c, "claude-jim-web":$claude_jim_web}')
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENO="$HOME/.deno/bin/deno"
